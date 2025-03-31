@@ -1,60 +1,131 @@
-const { REST } = require("@discordjs/rest"); // Define REST.
-const { Routes } = require("discord-api-types/v9"); // Define Routes.
-const fs = require("fs"); // Define fs (file system).
-const { Client, Intents, Collection } = require("discord.js"); // Define Client, Intents, and Collection.
+const { Client, GatewayIntentBits, Collection } = require('discord.js');
+const fs = require('fs');
+const path = require('path');
+
 const client = new Client({
-  intents: [Intents.FLAGS.GUILDS, Intents.FLAGS.GUILD_MESSAGES],
-}); // Connect to our discord bot.
-const commands = new Collection(); // Where the bot (slash) commands will be stored.
-const commandarray = []; // Array to store commands for sending to the REST API.
-const token = process.env.DISCORD_TOKEN; // Token from Railway Env Variable.
-// Execute code when the "ready" client event is triggered.
-client.once("ready", () => {
-  const commandFiles = fs
-    .readdirSync("src/Commands")
-    .filter(file => file.endsWith(".js")); // Get and filter all the files in the "Commands" Folder.
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMembers,
+    ],
+});
 
-  // Loop through the command files
-  for (const file of commandFiles) {
-    const command = require(`./Commands/${file}`); // Get and define the command file.
-    commands.set(command.data.name, command); // Set the command name and file for handler to use.
-    commandarray.push(command.data.toJSON()); // Push the command data to an array (for sending to the API).
-  }
+client.commands = new Collection();
+const prefix = '1';
+const dataPath = './data.json'; // JSON file to store user data
 
-  const rest = new REST({ version: "9" }).setToken(token); // Define "rest" for use in registering commands
-  // Register slash commands.
-  ;(async () => {
-    try {
-      console.log("Started refreshing application (/) commands.");
+const allowedChannels = ['1303408584494944267', '1285867845993103411']; // Replace with your allowed channel IDs
 
-      await rest.put(Routes.applicationCommands(client.user.id), {
-        body: commandarray,
-      });
+// Load commands
+const commandFiles = fs.readdirSync(path.join(__dirname, 'commands')).filter(file => file.endsWith('.js'));
 
-      console.log("Successfully reloaded application (/) commands.");
-    } catch (error) {
-      console.error(error);
+for (const file of commandFiles) {
+    const command = require(`./commands/${file}`);
+    client.commands.set(command.name, command);
+}
+
+// Load user data from JSON
+let userData = {};
+
+// Load existing user data if available
+if (fs.existsSync(dataPath)) {
+    userData = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+} else {
+    console.log("User data file does not exist. Creating a new one.");
+}
+
+function determineRank(level) {
+    if (level >= 1 && level <= 5) return 'Novice';
+    if (level >= 6 && level <= 10) return 'Intermediate';
+    if (level >= 11 && level <= 15) return 'Advanced';
+    if (level >= 16 && level <= 20) return 'Expert';
+    return 'Master'; // Level 21 and above
+}
+
+// Function to save user data
+function saveUserData() {
+    fs.writeFileSync(dataPath, JSON.stringify(userData, null, 4));
+}
+
+// Ensure user exists in the database
+function ensureUser(userId) {
+    if (!userData[userId]) {
+        userData[userId] = {
+            balance: 0,
+            bank: 0,
+            inventory: [],
+            achievements: [],
+            level: 1,
+            points: 0,
+            rank: "Novice",
+            quests: [],
+            cooldowns: {},
+            duo: null, // teammate for alliance
+            enabled: true,
+            redeemedCodes: [] // Add this line to track redeemed codes
+        };
     }
-  })();
-  console.log(`Logged in as ${client.user.tag}!`);
+}
+
+// Cooldown system
+function hasCooldown(userId, command) {
+    const currentTime = Date.now();
+    const cooldown = userData[userId].cooldowns[command];
+    return cooldown && cooldown > currentTime;
+}
+
+function setCooldown(userId, command, cooldownTime) {
+    userData[userId].cooldowns[command] = Date.now() + cooldownTime;
+    saveUserData();
+}
+
+// Command Handler
+client.on('messageCreate', message => {
+    if (!message.content.startsWith(prefix) || message.author.bot) return;
+
+    if (!allowedChannels.includes(message.channel.id)) {
+        return; // Ignore messages not in allowed channels
+    }
+
+    const user = message.author.id;
+    ensureUser(user);
+
+// Points and level progression
+userData[user].points += 10; // Award points per message
+const levelUpPoints = userData[user].level * 100; // Example level-up system
+
+if (userData[user].points >= levelUpPoints) {
+    userData[user].points = 0;
+    userData[user].level += 1;
+
+    // Update the user's rank
+    userData[user].rank = determineRank(userData[user].level);
+
+    message.channel.send(`${message.author.username}, you leveled up to level ${userData[user].level}! You are now a ${userData[user].rank}!`);
+}
+
+saveUserData();
+
+    // Command processing
+    const args = message.content.slice(prefix.length).trim().split(/ +/);
+    const commandName = args.shift().toLowerCase();
+    const command = client.commands.get(commandName);
+
+    if (!command) return;
+
+    if (!userData[user].enabled) {
+        return message.channel.send('You are currently disabled from using bot commands.');
+    }
+
+    try {
+        ensureUser(message.author.id); // Ensure user data is present
+        command.execute(message, args, userData, { ensureUser, saveUserData, hasCooldown, setCooldown });
+    } catch (error) {
+        console.error(error);
+        message.reply('There was an error trying to execute that command!');
+    }
 });
-// Command handler.
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isCommand()) return;
 
-  const command = commands.get(interaction.commandName);
-
-  if (!command) return;
-
-  try {
-    await command.execute(interaction, client);
-  } catch (error) {
-    console.error(error);
-    return interaction.reply({
-      content: "There was an error while executing this command!",
-      ephemeral: true,
-    });
-  }
-});
-
-client.login(token); // Login to the bot client via the defined "token" string.
+// Log the bot in
+client.login(token); // Use an environment variable for the token
